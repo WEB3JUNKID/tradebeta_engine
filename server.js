@@ -86,3 +86,55 @@ app.listen(PORT, async () => {
     console.log('Running initial boot scan...');
     await runScan(); // Run once immediately on startup
 });
+
+/**
+ * The Scan Loop: This will eventually house the SMC math.
+ */
+async function runScan() {
+    console.log(`[${new Date().toISOString()}] Initiating sweep...`);
+    let results = [];
+
+    for (const symbol of WATCHLIST) {
+        const ohlc = await getOHLC(symbol);
+        if (!ohlc) continue;
+
+        // Placeholder for the upcoming ICT Engine
+        // const signal = analyzeSMC(ohlc); 
+
+        // For now, just verifying the data pipeline is bleeding edge
+        const lastCandle = ohlc[ohlc.length - 1];
+        results.push({
+            symbol,
+            currentPrice: lastCandle.close,
+            dataPoints: ohlc.length,
+            status: "PIPELINE_ACTIVE"
+        });
+    }
+
+    lastScanResults = results;
+    console.log(`[${new Date().toISOString()}] Sweep complete. Valid targets: ${results.length}`);
+}
+
+// CRON JOB: Run the scan every 15 minutes automatically
+cron.schedule('*/15 * * * *', runScan);
+
+// --- API ENDPOINTS ---
+
+// 1. The Keepalive (For Uptime Robot so Render never sleeps)
+app.get('/health', (req, res) => res.status(200).json({ status: 'Terminal Heartbeat: OK' }));
+
+// 2. The Frontend Feed
+app.get('/scan', (req, res) => {
+    res.json({
+        timestamp: Date.now(),
+        data: lastScanResults
+    });
+});
+
+// Boot Sequence
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, async () => {
+    console.log(`TradeBeta Engine live on port ${PORT}.`);
+    console.log('Running initial boot scan...');
+    await runScan(); // Run once immediately on startup
+});
