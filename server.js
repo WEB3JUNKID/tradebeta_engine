@@ -6,126 +6,72 @@ const cron = require('node-cron');
 const app = express();
 app.use(cors());
 
-// Phase 1 Symbols (We'll expand this later)
-const WATCHLIST = ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'LINKUSDT'];
-
-/**
- * The Data Pipeline: Fetches raw OHLCV from Binance
- * Interval: 15m (Optimal for day/swing setups)
- */
-async function getOHLC(symbol, interval = '15m', limit = 100) {
-    const url = `https://api.binance.com/api/v3/klines?symbol=${symbol}&interval=${interval}&limit=${limit}`;
-    try {
-        const { data } = await axios.get(url);
-        // Map Binance's ugly array format into clean, readable objects
-        return data.map(d => ({
-            time: d[0],
-            open: parseFloat(d[1]),
-            high: parseFloat(d[2]),
-            low: parseFloat(d[3]),
-            close: parseFloat(d[4]),
-            volume: parseFloat(d[5])
-        }));
-    } catch (error) {
-        console.error(`Fetch failed for ${symbol}:`, error.message);
-        return null;
-    }
-}
-
-// Global cache so the frontend gets instant responses
+const WATCHLIST = ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'BNBUSDT', 'XRPUSDT', 'ADAUSDT', 'AVAXUSDT', 'DOTUSDT'];
 let lastScanResults = [];
 
-/**
- * The Scan Loop: This will eventually house the SMC math.
- */
-async function runScan() {
-    console.log(`[${new Date().toISOString()}] Initiating sweep...`);
-    let results = [];
+function analyzeSMC(ohlc, symbol) {
+    if (!ohlc || ohlc.length < 20) return null;
+    const last = ohlc[ohlc.length - 1];
+    const prev = ohlc[ohlc.length - 2];
+    const prev3 = ohlc[ohlc.length - 4];
 
-    for (const symbol of WATCHLIST) {
-        const ohlc = await getOHLC(symbol);
-        if (!ohlc) continue;
+    let signal = { symbol, type: null, confluence: [], score: 0, price: last.close };
 
-        // Placeholder for the upcoming ICT Engine
-        // const signal = analyzeSMC(ohlc); 
+    const bullishFVG = prev.low > prev3.high;
+    const bearishFVG = prev.high < prev3.low;
 
-        // For now, just verifying the data pipeline is bleeding edge
-        const lastCandle = ohlc[ohlc.length - 1];
-        results.push({
-            symbol,
-            currentPrice: lastCandle.close,
-            dataPoints: ohlc.length,
-            status: "PIPELINE_ACTIVE"
-        });
+    const lookback = ohlc.slice(-15, -1);
+    const localHigh = Math.max(...lookback.map(c => c.high));
+    const localLow = Math.min(...lookback.map(c => c.low));
+
+    if (last.close > localHigh) {
+        signal.type = 'LONG';
+        signal.confluence.push('BOS (Bullish)');
+        signal.score += 40;
+    } else if (last.close < localLow) {
+        signal.type = 'SHORT';
+        signal.confluence.push('BOS (Bearish)');
+        signal.score += 40;
     }
 
-    lastScanResults = results;
-    console.log(`[${new Date().toISOString()}] Sweep complete. Valid targets: ${results.length}`);
-}
-
-// CRON JOB: Run the scan every 15 minutes automatically
-cron.schedule('*/15 * * * *', runScan);
-
-// --- API ENDPOINTS ---
-
-// 1. The Keepalive (For Uptime Robot so Render never sleeps)
-app.get('/health', (req, res) => res.status(200).json({ status: 'Terminal Heartbeat: OK' }));
-
-// 2. The Frontend Feed
-app.get('/scan', (req, res) => {
-    res.json({
-        timestamp: Date.now(),
-        data: lastScanResults
-    });
-});
-
-// Boot Sequence
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, async () => {
-    console.log(`TradeBeta Engine live on port ${PORT}.`);
-    console.log('Running initial boot scan...');
-    await runScan(); // Run once immediately on startup
-});
-
-/**
- * The Scan Loop: This will eventually house the SMC math.
- */
-async function runScan() {
-    console.log(`[${new Date().toISOString()}] Initiating sweep...`);
-    let results = [];
-
-    for (const symbol of WATCHLIST) {
-        const ohlc = await getOHLC(symbol);
-        if (!ohlc) continue;
-
-        // Placeholder for the upcoming ICT Engine
-        // const signal = analyzeSMC(ohlc); 
-
-        // For now, just verifying the data pipeline is bleeding edge
-        const lastCandle = ohlc[ohlc.length - 1];
-        results.push({
-            symbol,
-            currentPrice: lastCandle.close,
-            dataPoints: ohlc.length,
-            status: "PIPELINE_ACTIVE"
-        });
+    if (signal.type === 'LONG' && bullishFVG) {
+        signal.confluence.push('FVG Detected');
+        signal.score += 40;
+    } else if (signal.type === 'SHORT' && bearishFVG) {
+        signal.confluence.push('FVG Detected');
+        signal.score += 40;
     }
 
-    lastScanResults = results;
-    console.log(`[${new Date().toISOString()}] Sweep complete. Valid targets: ${results.length}`);
+    return signal.score >= 40 ? signal : null;
 }
 
-// CRON JOB: Run the scan every 15 minutes automatically
-cron.schedule('*/15 * * * *', runScan);
+async function runScan() {
+    console.log("Starting Market Sweep...");
+    try {
+        let matches = [];
+        for (const s of WATCHLIST) {
+            const res = await axios.get(`https://api.binance.com/api/v3/klines?symbol=${s}&interval=15m&limit=50`);
+            const data = res.data.map(d => ({ high: parseFloat(d[2]), low: parseFloat(d[3]), close: parseFloat(d[4]) }));
+            const result = analyzeSMC(data, s);
+            if (result) matches.push(result);
+        }
+        lastScanResults = matches;
+        console.log(`Sweep finished. Found ${matches.length} setups.`);
+    } catch (e) {
+        console.error("Scan Error: ", e.message);
+    }
+}
 
-// --- API ENDPOINTS ---
+app.get('/', (req, res) => res.send("TradeBeta Engine Active"));
+app.get('/scan', (req, res) => res.json(lastScanResults));
 
-// 1. The Keepalive (For Uptime Robot so Render never sleeps)
-app.get('/health', (req, res) => res.status(200).json({ status: 'Terminal Heartbeat: OK' }));
+cron.schedule('*/5 * * * *', runScan);
 
-// 2. The Frontend Feed
-app.get('/scan', (req, res) => {
-    res.json({
+const PORT = process.env.PORT || 10000;
+app.listen(PORT, '0.0.0.0', () => {
+    console.log(`Server listening on port ${PORT}`);
+    runScan();
+});
         timestamp: Date.now(),
         data: lastScanResults
     });
