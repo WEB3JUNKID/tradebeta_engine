@@ -62,25 +62,15 @@ async function runScan() {
     }
 }
 
+// Routes
 app.get('/', (req, res) => res.send("TradeBeta Engine Active"));
 app.get('/scan', (req, res) => res.json(lastScanResults));
 
-cron.schedule('*/5 * * * *', runScan);
-
+// Use the port Render gives us
 const PORT = process.env.PORT || 10000;
-app.listen(PORT, '0.0.0.0', () => {
+app.listen(PORT, () => {
     console.log(`Server listening on port ${PORT}`);
     runScan();
 });
-        timestamp: Date.now(),
-        data: lastScanResults
-    });
-});
 
-// Boot Sequence
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, async () => {
-    console.log(`TradeBeta Engine live on port ${PORT}.`);
-    console.log('Running initial boot scan...');
-    await runScan(); // Run once immediately on startup
-});
+cron.schedule('*/5 * * * *', runScan);
