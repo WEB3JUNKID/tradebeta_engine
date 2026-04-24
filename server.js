@@ -50,7 +50,7 @@ async function runScan() {
     try {
         let matches = [];
         for (const s of WATCHLIST) {
-            const res = await axios.get(`https://api.binance.com/api/v3/klines?symbol=${s}&interval=15m&limit=50`);
+            const res = await axios.get(`https://api3.binance.com/api/v3/klines?symbol=${s}&interval=15m&limit=50`);
             const data = res.data.map(d => ({ high: parseFloat(d[2]), low: parseFloat(d[3]), close: parseFloat(d[4]) }));
             const result = analyzeSMC(data, s);
             if (result) matches.push(result);
