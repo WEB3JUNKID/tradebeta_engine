@@ -1,31 +1,62 @@
 const axios = require('axios');
 
-// Bybit is much more cloud-friendly than Binance
-const BASE = 'https://api.bybit.com';
+// api.bytick.com is Bybit's global routing mirror, much friendlier to US Cloud IPs
+const BASE = 'https://api.bytick.com';
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
+// Industrial Grade: Mimic a real browser to bypass Cloudflare's "Bot Fight Mode"
 const client = axios.create({
   baseURL: BASE,
-  timeout: 10000,
-  headers: { 'Content-Type': 'application/json' }
+  timeout: 15000,
+  headers: {
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+    'Accept': 'application/json, text/plain, */*',
+    'Accept-Language': 'en-US,en;q=0.9',
+    'Connection': 'keep-alive'
+  }
 });
 
+/**
+ * Industrial Grade Retry Logic (Exponential Backoff)
+ * Prevents the entire scanner from crashing if one request gets rate-limited.
+ */
+async function requestWithRetry(endpoint, params, retries = 3) {
+  for (let attempt = 1; attempt <= retries; attempt++) {
+    try {
+      const response = await client.get(endpoint, { params });
+      return response.data;
+    } catch (error) {
+      const status = error.response ? error.response.status : 'NETWORK_ERROR';
+      const msg = error.response && error.response.data ? JSON.stringify(error.response.data) : error.message;
+      
+      console.warn(`[API Attempt ${attempt}/${retries}] Failed: ${status} | ${msg}`);
+
+      if (attempt === retries) throw error; // Give up after max retries
+
+      // Exponential backoff: Wait 1s, then 2s, then 3s...
+      await sleep(attempt * 1000);
+    }
+  }
+}
+
+/**
+ * Fetch klines (OHLCV) from Bybit USDT Perpetuals
+ */
 async function fetchKlines(symbol, interval, limit = 200) {
     try {
-        // Bybit mapping for intervals
         const intervalMap = { '1h': '60', '15m': '15', '5m': '5', '4h': '240' };
         const bybitInterval = intervalMap[interval] || interval;
 
-        const { data } = await client.get('/v5/market/kline', {
-            params: { 
-                category: 'linear', 
-                symbol: symbol, 
-                interval: bybitInterval, 
-                limit: limit 
-            }
+        const data = await requestWithRetry('/v5/market/kline', {
+            category: 'linear',
+            symbol: symbol,
+            interval: bybitInterval,
+            limit: limit
         });
 
-        // Bybit returns [startTime, open, high, low, close, volume, turnover]
+        // Ensure data exists before mapping to avoid undefined crashes
+        if (!data || !data.result || !data.result.list) return null;
+
         return data.result.list.map(k => ({
             time:   parseInt(k[0]),
             open:   parseFloat(k[1]),
@@ -33,27 +64,36 @@ async function fetchKlines(symbol, interval, limit = 200) {
             low:    parseFloat(k[3]),
             close:  parseFloat(k[4]),
             volume: parseFloat(k[5])
-        })).reverse(); // Bybit returns newest first, we need chronological
+        })).reverse(); // Standardize to chronological order
     } catch (err) {
-        console.error(`[Bybit] Error fetching ${symbol}: ${err.message}`);
+        console.error(`[Data Fetch] Critical failure for ${symbol}: ${err.message}`);
         return null;
     }
 }
 
+/**
+ * Get top N USDT perpetual futures symbols by 24h turnover.
+ */
 async function getTopSymbols(n = 30) {
     try {
-        const { data } = await client.get('/v5/market/tickers', {
-            params: { category: 'linear' }
+        const data = await requestWithRetry('/v5/market/tickers', {
+            category: 'linear'
         });
-        
+
+        if (!data || !data.result || !data.result.list) throw new Error("Invalid payload structure from API");
+
         return data.result.list
             .filter(t => t.symbol.endsWith('USDT'))
             .sort((a, b) => parseFloat(b.turnover24h) - parseFloat(a.turnover24h))
             .slice(0, n)
             .map(t => t.symbol);
     } catch (err) {
-        console.error('[Bybit] Failed to fetch symbols:', err.message);
-        return ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'BNBUSDT', 'AVAXUSDT'];
+        console.error('[Ticker Fetch] Critical failure, using fallback list:', err.message);
+        // Fallback list ensures the engine keeps running even if the ticker endpoint fails
+        return [
+            'BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'BNBUSDT', 'XRPUSDT',
+            'ADAUSDT', 'AVAXUSDT', 'DOTUSDT', 'LINKUSDT', 'MATICUSDT'
+        ];
     }
 }
 
