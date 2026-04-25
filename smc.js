@@ -89,7 +89,7 @@ function analyzeMarket(htfCandles, ltfCandles) {
 // 2. SWING DETECTION
 // ─────────────────────────────────────────────
 
-function findSwings(candles, lookback = 3) {
+function findSwings(candles, lookback = 6) {
   const highs = [];
   const lows  = [];
 
@@ -115,7 +115,7 @@ function findSwings(candles, lookback = 3) {
 // ─────────────────────────────────────────────
 
 function detectStructure(candles) {
-  const { highs, lows } = findSwings(candles, 3);
+  const { highs, lows } = findSwings(candles, 6);
 
   if (highs.length < 2 || lows.length < 2) return null;
 
@@ -199,7 +199,7 @@ function isOBMitigated(ob, candles, fromIndex) {
 }
 
 // ─────────────────────────────────────────────
-// 5. FAIR VALUE GAP (FVG) LOGIC (Ported from V2)
+// 5. FAIR VALUE GAP (FVG) LOGIC
 // ─────────────────────────────────────────────
 
 function findFVGs(candles, bias, minGapPercent = 0.001) {
@@ -269,14 +269,20 @@ function detectCRT(candles, bias, htfStructure = null) {
   const last = candles[candles.length - 1]; 
   const prev = candles[candles.length - 2]; 
 
+  // Extract LTF Swings to use as true liquidity levels instead of previous candle
+  const { highs, lows } = findSwings(candles, 6);
+
   if (bias === 'BULLISH') {
     const htfLowPrice = (htfStructure && htfStructure.lastLow) ? htfStructure.lastLow.price : null;
     
+    // Find the most recent LTF Swing Low. Fallback to prev candle if undefined.
+    const ltfLastLow = lows.length > 0 ? lows[lows.length - 1].price : prev.low;
+    
     const sweptHtf    = htfLowPrice && (last.low < htfLowPrice && last.close > htfLowPrice);
-    const sweptLtf    = last.low < prev.low && last.close > prev.low;
+    const sweptLtf    = last.low < ltfLastLow && last.close > ltfLastLow;
     
     const sweptBelow  = sweptHtf || sweptLtf;
-    const sweepLevel  = sweptHtf ? htfLowPrice : prev.low;
+    const sweepLevel  = sweptHtf ? htfLowPrice : ltfLastLow;
     
     const strongClose = last.close > (last.low + last.high) / 2;
     const sweepMagnitude = (sweepLevel - last.low) / sweepLevel;
@@ -284,7 +290,7 @@ function detectCRT(candles, bias, htfStructure = null) {
 
     if (sweptBelow && strongClose && reasonableSweep) {
       const sweepWick = last.low;
-      const sl        = sweepWick * (1 - 0.001); // Using V1's tighter SL buffer
+      const sl        = sweepWick * (1 - 0.002); // Widened buffer to 0.2%
       const entry     = last.close;
       const risk      = entry - sl;
 
@@ -322,11 +328,14 @@ function detectCRT(candles, bias, htfStructure = null) {
   if (bias === 'BEARISH') {
     const htfHighPrice = (htfStructure && htfStructure.lastHigh) ? htfStructure.lastHigh.price : null;
     
+    // Find the most recent LTF Swing High. Fallback to prev candle if undefined.
+    const ltfLastHigh = highs.length > 0 ? highs[highs.length - 1].price : prev.high;
+
     const sweptHtf    = htfHighPrice && (last.high > htfHighPrice && last.close < htfHighPrice);
-    const sweptLtf    = last.high > prev.high && last.close < prev.high;
+    const sweptLtf    = last.high > ltfLastHigh && last.close < ltfLastHigh;
     
     const sweptAbove  = sweptHtf || sweptLtf;
-    const sweepLevel  = sweptHtf ? htfHighPrice : prev.high;
+    const sweepLevel  = sweptHtf ? htfHighPrice : ltfLastHigh;
     
     const strongClose = last.close < (last.low + last.high) / 2;
     const sweepMagnitude = (last.high - sweepLevel) / sweepLevel;
@@ -334,7 +343,7 @@ function detectCRT(candles, bias, htfStructure = null) {
 
     if (sweptAbove && strongClose && reasonableSweep) {
       const sweepWick = last.high;
-      const sl        = sweepWick * (1 + 0.001); 
+      const sl        = sweepWick * (1 + 0.002); // Widened buffer to 0.2%
       const entry     = last.close;
       const risk      = sl - entry;
 
@@ -398,4 +407,4 @@ module.exports = {
   priceInZone,
   priceNearZone
 };
-    
+                            
