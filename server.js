@@ -1,3 +1,4 @@
+
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
@@ -140,8 +141,12 @@ app.listen(PORT, '0.0.0.0', () => {
 });
 
 // Cron: Run every 15 minutes
-cron.schedule('*/15 * * * *', runEngine);
+cron.schedule('*/10 * * * *', runEngine);
 
 // Clean exit
 process.once('SIGINT', () => bot.stop('SIGINT'));
 process.once('SIGTERM', () => bot.stop('SIGTERM'));
+
+
+
+
