@@ -1,11 +1,12 @@
 /**
- * smc.js — Strict Multi-Timeframe Smart Money Concepts Engine
+ * smc.js — Strict Multi-Timeframe Smart Money Concepts Engine (V1 + FVG Integration)
  *
  * Implements:
  * 1. MTF Bridging (HTF Narrative + LTF Execution)
  * 2. Strict Market Structure (BOS / CHoCH)
- * 3. Unmitigated Order Block detection
- * 4. Strict Candle Range Theory (CRT) entry with RR calculation
+ * 3. Unmitigated Order Block & FVG detection
+ * 4. FVG + OB Overlap Logic (Silver Bullet setups)
+ * 5. CRT Entry with Dynamic HTF Targeting & Strict RR >= 3 filter
  *
  * All functions are PURE — no side effects, no external calls.
  * Candle format: { time, open, high, low, close, volume }
@@ -15,53 +16,73 @@
 // 1. MULTI-TIMEFRAME BRIDGING (The Engine Core)
 // ─────────────────────────────────────────────
 
-/**
- * Combined Multi-Timeframe Analysis
- * Takes HTF candles (to find the 'big' move/zone) and LTF candles (to find the precise entry).
- */
 function analyzeMarket(htfCandles, ltfCandles) {
-  // 1. Get Strict HTF Structure
   const htfStructure = detectStructure(htfCandles);
   if (!htfStructure) return { status: 'No HTF Structure' };
 
-  // 2. Find the HTF Order Block
   const htfOB = findOrderBlock(htfCandles, htfStructure);
-  if (!htfOB) return { status: 'No HTF Order Block', bias: htfStructure.bias };
-
-  // 3. Strict Check: Is the HTF Order Block already mitigated?
-  // We don't want to trade off a zone that has already been tested and depleted.
-  if (isOBMitigated(htfOB, htfCandles, htfOB.index + 1)) {
-    return { status: 'HTF Order Block Mitigated', bias: htfStructure.bias };
+  const htfFVGs = findFVGs(htfCandles, htfStructure.bias);
+  
+  // FVG + OB Confluence Check ("Silver Bullet" zone)
+  let overlappingFVG = null;
+  if (htfOB && htfFVGs.length > 0) {
+    overlappingFVG = htfFVGs.find(fvg => fvgOverlapsOB(fvg, htfOB));
   }
 
-  // 4. Get the latest LTF price
   const currentPrice = ltfCandles[ltfCandles.length - 1].close;
 
-  // 5. Check if LTF price is inside or near the HTF Order Block
-  const inZone = priceNearZone(currentPrice, htfOB, 0.005); // 0.5% tolerance
-
-  if (!inZone) {
-    return { 
-      status: 'Waiting for Retracement to HTF Zone', 
-      bias: htfStructure.bias, 
-      zone: htfOB 
-    };
-  }
-
-  // 6. Look for the STRICT CRT Sweep on the LTF
-  // This calculates exact Entry, Stop Loss, and Take Profit.
-  const entryTrigger = detectCRT(ltfCandles, htfStructure.bias);
+  // 1. Look for the STRICT CRT Sweep (Passes HTF Structure for Dynamic Targets)
+  const entryTrigger = detectCRT(ltfCandles, htfStructure.bias, htfStructure);
 
   if (entryTrigger) {
     return {
       status: 'TRADE_SIGNAL',
       signal: entryTrigger,
       htfBias: htfStructure.bias,
-      htfZone: htfOB
+      htfZone: htfOB || 'No OB - Structural Sweep',
+      confluence: overlappingFVG ? 'OB + FVG Overlap' : 'Standard',
+      fvgData: overlappingFVG || null
     };
   }
 
-  return { status: 'In HTF Zone, awaiting Strict LTF Sweep', bias: htfStructure.bias };
+  // 2. Check OB Mitigation & Confluence status if no immediate sweep is found
+  if (htfOB) {
+    if (isOBMitigated(htfOB, htfCandles, htfOB.index + 1)) {
+      return { status: 'HTF Order Block Mitigated', bias: htfStructure.bias };
+    }
+
+    // If we have an overlapping FVG, we treat the combination as a broader target zone
+    const targetZone = overlappingFVG 
+      ? { top: Math.max(htfOB.top, overlappingFVG.top), bottom: Math.min(htfOB.bottom, overlappingFVG.bottom) } 
+      : htfOB;
+
+    const inZone = priceNearZone(currentPrice, targetZone, 0.005);
+    if (!inZone) {
+      return { 
+        status: 'Waiting for Retracement to HTF Zone or Level Sweep', 
+        bias: htfStructure.bias, 
+        zone: htfOB,
+        hasFvgConfluence: !!overlappingFVG
+      };
+    }
+  } else if (htfFVGs.length > 0) {
+    // Fallback: If no OB is found but an unmitigated FVG exists
+    const latestFVG = htfFVGs[htfFVGs.length - 1];
+    const inFvg = priceNearZone(currentPrice, latestFVG, 0.005);
+    if (!inFvg) {
+      return {
+        status: 'Waiting for Retracement to HTF FVG',
+        bias: htfStructure.bias,
+        zone: latestFVG
+      };
+    }
+  }
+
+  return { 
+    status: 'In HTF Zone, awaiting Strict LTF Sweep', 
+    bias: htfStructure.bias,
+    hasFvgConfluence: !!overlappingFVG 
+  };
 }
 
 // ─────────────────────────────────────────────
@@ -103,7 +124,6 @@ function detectStructure(candles) {
   const lastLow  = lows[lows.length - 1];
   const prevLow  = lows[lows.length - 2];
 
-  // Check the LAST CLOSED candle to avoid false triggers on wicks mid-candle
   const lastConfirmed = candles[candles.length - 2];
 
   let bias          = null;
@@ -129,16 +149,7 @@ function detectStructure(candles) {
 
   if (!bias) return null;
 
-  return {
-    bias,
-    bosLevel,
-    bosIndex,
-    structureType,
-    lastHigh,
-    lastLow,
-    prevHigh,
-    prevLow
-  };
+  return { bias, bosLevel, bosIndex, structureType, lastHigh, lastLow, prevHigh, prevLow };
 }
 
 // ─────────────────────────────────────────────
@@ -159,35 +170,16 @@ function findOrderBlock(candles, structure) {
     const isBearish = c.close < c.open;
     const isBullish = c.close > c.open;
 
-    // Strict Rule: Require meaningful body > 20% of the candle range
     const body  = Math.abs(c.close - c.open);
     const range = c.high - c.low;
     if (range === 0 || body / range < 0.2) continue;
 
     if (bias === 'BULLISH' && isBearish) {
-      return {
-        bias:       'BULLISH',
-        top:        c.open,          
-        bottom:     c.low,           
-        bodyTop:    c.open,
-        bodyBottom: c.close,
-        index:      i,
-        time:       c.time,
-        mitigated:  false
-      };
+      return { bias: 'BULLISH', top: c.open, bottom: c.low, bodyTop: c.open, bodyBottom: c.close, index: i, time: c.time, mitigated: false };
     }
 
     if (bias === 'BEARISH' && isBullish) {
-      return {
-        bias:       'BEARISH',
-        top:        c.high,          
-        bottom:     c.open,          
-        bodyTop:    c.close,
-        bodyBottom: c.open,
-        index:      i,
-        time:       c.time,
-        mitigated:  false
-      };
+      return { bias: 'BEARISH', top: c.high, bottom: c.open, bodyTop: c.close, bodyBottom: c.open, index: i, time: c.time, mitigated: false };
     }
   }
 
@@ -207,7 +199,7 @@ function isOBMitigated(ob, candles, fromIndex) {
 }
 
 // ─────────────────────────────────────────────
-// 5. FAIR VALUE GAP (FVG)
+// 5. FAIR VALUE GAP (FVG) LOGIC (Ported from V2)
 // ─────────────────────────────────────────────
 
 function findFVGs(candles, bias, minGapPercent = 0.001) {
@@ -241,6 +233,7 @@ function findFVGs(candles, bias, minGapPercent = 0.001) {
     }
   }
 
+  // Check if filled by subsequent price action
   for (const fvg of fvgs) {
     for (let i = fvg.index + 2; i < candles.length; i++) {
       const c = candles[i];
@@ -249,10 +242,13 @@ function findFVGs(candles, bias, minGapPercent = 0.001) {
     }
   }
 
+  // Return the last 5 unmitigated FVGs
   return fvgs.filter(f => !f.filled).slice(-5);
 }
 
 function fvgOverlapsOB(fvg, ob) {
+  if (!fvg || !ob) return false;
+  
   const overlapTop    = Math.min(fvg.top, ob.top);
   const overlapBottom = Math.max(fvg.bottom, ob.bottom);
   if (overlapTop <= overlapBottom) return false;
@@ -260,44 +256,63 @@ function fvgOverlapsOB(fvg, ob) {
   const overlapSize = overlapTop - overlapBottom;
   const minSize     = Math.min(fvg.top - fvg.bottom, ob.top - ob.bottom);
 
-  return overlapSize / minSize >= 0.1;
+  return overlapSize / minSize >= 0.1; // Requires at least 10% overlap
 }
 
 // ─────────────────────────────────────────────
 // 6. STRICT CANDLE RANGE THEORY (CRT) TRIGGER
 // ─────────────────────────────────────────────
 
-function detectCRT(candles, bias) {
+function detectCRT(candles, bias, htfStructure = null) {
   if (candles.length < 3) return null;
 
   const last = candles[candles.length - 1]; 
   const prev = candles[candles.length - 2]; 
 
   if (bias === 'BULLISH') {
-    const sweptBelow    = last.low < prev.low;          
-    const closedAbove   = last.close > prev.low;        
-    const strongClose   = last.close > (last.low + last.high) / 2; // Strict Rule: Close in upper 50%
-
-    // Strict Rule: Sweep must not be an aggressive breakdown (> 2%)
-    const sweepMagnitude  = (prev.low - last.low) / prev.low;
+    const htfLowPrice = (htfStructure && htfStructure.lastLow) ? htfStructure.lastLow.price : null;
+    
+    const sweptHtf    = htfLowPrice && (last.low < htfLowPrice && last.close > htfLowPrice);
+    const sweptLtf    = last.low < prev.low && last.close > prev.low;
+    
+    const sweptBelow  = sweptHtf || sweptLtf;
+    const sweepLevel  = sweptHtf ? htfLowPrice : prev.low;
+    
+    const strongClose = last.close > (last.low + last.high) / 2;
+    const sweepMagnitude = (sweepLevel - last.low) / sweepLevel;
     const reasonableSweep = sweepMagnitude < 0.02;
 
-    if (sweptBelow && closedAbove && strongClose && reasonableSweep) {
+    if (sweptBelow && strongClose && reasonableSweep) {
       const sweepWick = last.low;
-      const sl        = sweepWick * (1 - 0.0015); // Buffer SL
+      const sl        = sweepWick * (1 - 0.001); // Using V1's tighter SL buffer
       const entry     = last.close;
       const risk      = entry - sl;
 
       if (risk <= 0) return null;
 
+      let target, rr;
+      
+      // Dynamic Targeting: Target the HTF Last High
+      if (htfStructure && htfStructure.lastHigh) {
+        target = htfStructure.lastHigh.price;
+        rr = (target - entry) / risk;
+        
+        if (rr < 3) return null; // STRICT FILTER
+      } else {
+        target = entry + (risk * 5);
+        rr = 5;
+      }
+
       return {
         type:       'BULLISH_CRT',
-        entry,
-        sl,
-        tp:         entry + (risk * 5),
-        tp3:        entry + (risk * 3),
-        rr:         5,
-        risk,
+        signal:     'CRT',
+        entry:      entry,
+        sl:         sl,
+        tp:         target,
+        rr:         Number(rr.toFixed(2)),
+        risk:       risk,
+        sweepLevel: sweepLevel,
+        isHtfSweep: sweptHtf,
         candleTime: last.time,
         valid:      true
       };
@@ -305,29 +320,49 @@ function detectCRT(candles, bias) {
   }
 
   if (bias === 'BEARISH') {
-    const sweptAbove    = last.high > prev.high;
-    const closedBelow   = last.close < prev.high;
-    const strongClose   = last.close < (last.low + last.high) / 2; // Strict Rule: Close in lower 50%
-
-    const sweepMagnitude  = (last.high - prev.high) / prev.high;
+    const htfHighPrice = (htfStructure && htfStructure.lastHigh) ? htfStructure.lastHigh.price : null;
+    
+    const sweptHtf    = htfHighPrice && (last.high > htfHighPrice && last.close < htfHighPrice);
+    const sweptLtf    = last.high > prev.high && last.close < prev.high;
+    
+    const sweptAbove  = sweptHtf || sweptLtf;
+    const sweepLevel  = sweptHtf ? htfHighPrice : prev.high;
+    
+    const strongClose = last.close < (last.low + last.high) / 2;
+    const sweepMagnitude = (last.high - sweepLevel) / sweepLevel;
     const reasonableSweep = sweepMagnitude < 0.02;
 
-    if (sweptAbove && closedBelow && strongClose && reasonableSweep) {
+    if (sweptAbove && strongClose && reasonableSweep) {
       const sweepWick = last.high;
-      const sl        = sweepWick * (1 + 0.0015);
+      const sl        = sweepWick * (1 + 0.001); 
       const entry     = last.close;
       const risk      = sl - entry;
 
       if (risk <= 0) return null;
 
+      let target, rr;
+      
+      // Dynamic Targeting: Target the HTF Last Low
+      if (htfStructure && htfStructure.lastLow) {
+        target = htfStructure.lastLow.price;
+        rr = (entry - target) / risk;
+        
+        if (rr < 3) return null; // STRICT FILTER
+      } else {
+        target = entry - (risk * 5);
+        rr = 5;
+      }
+
       return {
         type:       'BEARISH_CRT',
-        entry,
-        sl,
-        tp:         entry - (risk * 5),
-        tp3:        entry - (risk * 3),
-        rr:         5,
-        risk,
+        signal:     'CRT',
+        entry:      entry,
+        sl:         sl,
+        tp:         target,
+        rr:         Number(rr.toFixed(2)),
+        risk:       risk,
+        sweepLevel: sweepLevel,
+        isHtfSweep: sweptHtf,
         candleTime: last.time,
         valid:      true
       };
@@ -352,7 +387,7 @@ function priceNearZone(price, zone, tolerancePct = 0.02) {
 }
 
 module.exports = {
-  analyzeMarket, // Multi-timeframe entry point
+  analyzeMarket,
   findSwings,
   detectStructure,
   findOrderBlock,
@@ -363,3 +398,4 @@ module.exports = {
   priceInZone,
   priceNearZone
 };
+    
