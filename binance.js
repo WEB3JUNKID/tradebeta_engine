@@ -1,107 +1,60 @@
-/**
- * binance.js
- * Binance USDT-M Futures public API wrapper.
- * No API key required. Weight-aware with retry logic.
- */
-
 const axios = require('axios');
 
-const BASE = 'https://fapi3.binance.com';
+// Bybit is much more cloud-friendly than Binance
+const BASE = 'https://api.bybit.com';
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
-// Axios instance with timeout
 const client = axios.create({
   baseURL: BASE,
   timeout: 10000,
   headers: { 'Content-Type': 'application/json' }
 });
 
-/**
- * Fetch klines (OHLCV) from Binance Futures
- * @param {string} symbol  e.g. 'BTCUSDT'
- * @param {string} interval  '4h' | '1h' | '15m' | '5m'
- * @param {number} limit  max 1500
- * @returns {Array<{time,open,high,low,close,volume}>}
- */
-async function fetchKlines(symbol, interval, limit = 200, retries = 3) {
-  for (let attempt = 1; attempt <= retries; attempt++) {
+async function fetchKlines(symbol, interval, limit = 200) {
     try {
-      const { data } = await client.get('/fapi/v1/klines', {
-        params: { symbol, interval, limit }
-      });
+        // Bybit mapping for intervals
+        const intervalMap = { '1h': '60', '15m': '15', '5m': '5', '4h': '240' };
+        const bybitInterval = intervalMap[interval] || interval;
 
-      return data.map(k => ({
-        time:   k[0],
-        open:   parseFloat(k[1]),
-        high:   parseFloat(k[2]),
-        low:    parseFloat(k[3]),
-        close:  parseFloat(k[4]),
-        volume: parseFloat(k[5])
-      }));
+        const { data } = await client.get('/v5/market/kline', {
+            params: { 
+                category: 'linear', 
+                symbol: symbol, 
+                interval: bybitInterval, 
+                limit: limit 
+            }
+        });
+
+        // Bybit returns [startTime, open, high, low, close, volume, turnover]
+        return data.result.list.map(k => ({
+            time:   parseInt(k[0]),
+            open:   parseFloat(k[1]),
+            high:   parseFloat(k[2]),
+            low:    parseFloat(k[3]),
+            close:  parseFloat(k[4]),
+            volume: parseFloat(k[5])
+        })).reverse(); // Bybit returns newest first, we need chronological
     } catch (err) {
-      const status = err.response?.status;
-      if (status === 429 || status === 418) {
-        // Rate limited — exponential backoff
-        const wait = attempt * 2000;
-        console.warn(`[Binance] Rate limit hit for ${symbol}. Waiting ${wait}ms...`);
-        await sleep(wait);
-      } else if (attempt === retries) {
-        console.error(`[Binance] Failed to fetch ${symbol} ${interval}: ${err.message}`);
+        console.error(`[Bybit] Error fetching ${symbol}: ${err.message}`);
         return null;
-      } else {
-        await sleep(500 * attempt);
-      }
     }
-  }
-  return null;
 }
 
-/**
- * Get top N USDT perpetual futures symbols by 24h quote volume.
- * Excludes stablecoins and low-volatility assets.
- * @param {number} n
- * @returns {string[]}
- */
 async function getTopSymbols(n = 30) {
-  const EXCLUDE = ['USDC', 'BUSD', 'TUSD', 'USDT', 'DAI', 'USDP', 'FRAX'];
-
-  try {
-    const { data } = await client.get('/fapi/v1/ticker/24hr');
-
-    return data
-      .filter(t => {
-        const sym = t.symbol;
-        if (!sym.endsWith('USDT')) return false;
-        if (EXCLUDE.some(s => sym.includes(s) && sym !== 'BTCUSDT')) return false;
-        if (parseFloat(t.quoteVolume) < 50_000_000) return false; // Min $50M daily volume
-        if (Math.abs(parseFloat(t.priceChangePercent)) < 0.5) return false; // Skip dead coins
-        return true;
-      })
-      .sort((a, b) => parseFloat(b.quoteVolume) - parseFloat(a.quoteVolume))
-      .slice(0, n)
-      .map(t => t.symbol);
-  } catch (err) {
-    console.error('[Binance] Failed to fetch top symbols:', err.message);
-    // Fallback to manual list
-    return [
-      'BTCUSDT','ETHUSDT','BNBUSDT','SOLUSDT','XRPUSDT',
-      'DOGEUSDT','ADAUSDT','AVAXUSDT','DOTUSDT','LINKUSDT',
-      'MATICUSDT','LTCUSDT','NEARUSDT','ATOMUSDT','UNIUSDT',
-      'APTUSDT','ARBUSDT','OPUSDT','INJUSDT','SUIUSDT'
-    ];
-  }
+    try {
+        const { data } = await client.get('/v5/market/tickers', {
+            params: { category: 'linear' }
+        });
+        
+        return data.result.list
+            .filter(t => t.symbol.endsWith('USDT'))
+            .sort((a, b) => parseFloat(b.turnover24h) - parseFloat(a.turnover24h))
+            .slice(0, n)
+            .map(t => t.symbol);
+    } catch (err) {
+        console.error('[Bybit] Failed to fetch symbols:', err.message);
+        return ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'BNBUSDT', 'AVAXUSDT'];
+    }
 }
 
-/**
- * Get current mark price for a symbol
- */
-async function getMarkPrice(symbol) {
-  try {
-    const { data } = await client.get('/fapi/v1/premiumIndex', { params: { symbol } });
-    return parseFloat(data.markPrice);
-  } catch {
-    return null;
-  }
-}
-
-module.exports = { fetchKlines, getTopSymbols, getMarkPrice };
+module.exports = { fetchKlines, getTopSymbols };
