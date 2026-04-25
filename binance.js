@@ -6,7 +6,7 @@
 
 const axios = require('axios');
 
-const BASE = 'https://fapi.binance.com';
+const BASE = 'https://fapi3.binance.com';
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
 // Axios instance with timeout
