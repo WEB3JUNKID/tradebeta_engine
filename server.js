@@ -1,76 +1,70 @@
 const express = require('express');
 const cors = require('cors');
-const axios = require('axios');
 const cron = require('node-cron');
+const { fetchKlines, getTopSymbols } = require('./binance');
+const { detectStructure, findOrderBlock, findFVGs, detectCRT } = require('./smc');
 
 const app = express();
 app.use(cors());
 
-const WATCHLIST = ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'BNBUSDT', 'XRPUSDT', 'ADAUSDT', 'AVAXUSDT', 'DOTUSDT'];
-let lastScanResults = [];
+let engineOutput = {
+  lastUpdate: null,
+  setups: []
+};
 
-function analyzeSMC(ohlc, symbol) {
-    if (!ohlc || ohlc.length < 20) return null;
-    const last = ohlc[ohlc.length - 1];
-    const prev = ohlc[ohlc.length - 2];
-    const prev3 = ohlc[ohlc.length - 4];
+async function runEngine() {
+  console.log("🚀 Starting TradeBeta SMC Scan...");
+  const symbols = await getTopSymbols(30);
+  const results = [];
 
-    let signal = { symbol, type: null, confluence: [], score: 0, price: last.close };
-
-    const bullishFVG = prev.low > prev3.high;
-    const bearishFVG = prev.high < prev3.low;
-
-    const lookback = ohlc.slice(-15, -1);
-    const localHigh = Math.max(...lookback.map(c => c.high));
-    const localLow = Math.min(...lookback.map(c => c.low));
-
-    if (last.close > localHigh) {
-        signal.type = 'LONG';
-        signal.confluence.push('BOS (Bullish)');
-        signal.score += 40;
-    } else if (last.close < localLow) {
-        signal.type = 'SHORT';
-        signal.confluence.push('BOS (Bearish)');
-        signal.score += 40;
-    }
-
-    if (signal.type === 'LONG' && bullishFVG) {
-        signal.confluence.push('FVG Detected');
-        signal.score += 40;
-    } else if (signal.type === 'SHORT' && bearishFVG) {
-        signal.confluence.push('FVG Detected');
-        signal.score += 40;
-    }
-
-    return signal.score >= 40 ? signal : null;
-}
-
-async function runScan() {
-    console.log("Starting Market Sweep...");
+  for (const symbol of symbols) {
     try {
-        let matches = [];
-        for (const s of WATCHLIST) {
-            const res = await axios.get(`https://api3.binance.com/api/v3/klines?symbol=${s}&interval=15m&limit=50`);
-            const data = res.data.map(d => ({ high: parseFloat(d[2]), low: parseFloat(d[3]), close: parseFloat(d[4]) }));
-            const result = analyzeSMC(data, s);
-            if (result) matches.push(result);
-        }
-        lastScanResults = matches;
-        console.log(`Sweep finished. Found ${matches.length} setups.`);
-    } catch (e) {
-        console.error("Scan Error: ", e.message);
+      // Fetch 1H for Structure/OB/FVG and 15m for CRT Entry Trigger
+      const candles1H = await fetchKlines(symbol, '1h', 100);
+      const candles15m = await fetchKlines(symbol, '15m', 100);
+
+      if (!candles1H || !candles15m) continue;
+
+      const structure = detectStructure(candles1H);
+      if (!structure) continue;
+
+      const ob = findOrderBlock(candles1H, structure);
+      const fvgs = findFVGs(candles1H, structure.bias);
+      const entry = detectCRT(candles15m, structure.bias);
+
+      if (entry) {
+        results.push({
+          symbol,
+          bias: structure.bias,
+          structure: structure.structureType, // BOS or CHoCH
+          orderBlock: ob,
+          fvgCount: fvgs.length,
+          entry: entry,
+          time: new Date().toISOString()
+        });
+      }
+    } catch (err) {
+      console.error(`Error scanning ${symbol}:`, err.message);
     }
+  }
+
+  engineOutput = {
+    lastUpdate: new Date().toLocaleTimeString(),
+    setups: results
+  };
+  console.log(`✅ Scan Complete. Found ${results.length} high-probability setups.`);
 }
 
 // Routes
-app.get('/', (req, res) => res.send("TradeBeta Engine Active"));
-app.get('/scan', (req, res) => res.json(lastScanResults));
+app.get('/', (req, res) => res.send("TradeBeta V2 Backend: Online"));
+app.get('/scan', (req, res) => res.json(engineOutput));
 
-// Use the port Render gives us
+// Port and Init
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => {
-    console.log(`Server listening on port ${PORT}`);
-    runScan();
+  console.log(`Server listening on ${PORT}`);
+  runEngine(); // Run once on boot
 });
 
-cron.schedule('*/5 * * * *', runScan);
+// Cron: Run every 15 minutes to align with the M15 timeframe
+cron.schedule('*/15 * * * *', runEngine);
