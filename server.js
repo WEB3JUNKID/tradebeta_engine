@@ -1,8 +1,6 @@
-
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
-const cron = require('node-cron');
 const { Telegraf } = require('telegraf');
 
 // Make sure you have these files in your directory!
@@ -15,6 +13,10 @@ app.use(cors());
 
 const bot = new Telegraf(process.env.TELEGRAM_TOKEN);
 const CHANNEL_ID = process.env.TELEGRAM_CHANNEL_ID;
+
+// SCAN SETTINGS
+const SCAN_INTERVAL = 10 * 60 * 1000; // 15 Minutes
+let isScanning = false; 
 
 let engineOutput = {
   lastUpdate: null,
@@ -62,6 +64,12 @@ async function broadcastSignals(setups) {
 
 // 3. The Core Logic
 async function runEngine() {
+  if (isScanning) {
+    console.log("⚠️ Scan already in progress. Skipping this interval to prevent overlap.");
+    return;
+  }
+
+  isScanning = true;
   console.log("🚀 Starting Market Sweep...");
   
   try {
@@ -70,6 +78,7 @@ async function runEngine() {
 
     if (!symbols || symbols.length === 0) {
       console.log("⚠️ No symbols fetched. Skipping scan.");
+      isScanning = false;
       return;
     }
 
@@ -116,6 +125,8 @@ async function runEngine() {
     console.log(`✅ Scan Complete. Found ${results.length} setups.`);
   } catch (globalErr) {
     console.error("❌ Global Engine Error:", globalErr.message);
+  } finally {
+    isScanning = false; // Always release the lock, even if there's an error
   }
 }
 
@@ -138,15 +149,12 @@ app.listen(PORT, '0.0.0.0', () => {
   setTimeout(() => {
     runEngine();
   }, 5000);
-});
 
-// Cron: Run every 15 minutes
-cron.schedule('*/10 * * * *', runEngine);
+  // Set the recurring loop
+  setInterval(runEngine, SCAN_INTERVAL);
+});
 
 // Clean exit
 process.once('SIGINT', () => bot.stop('SIGINT'));
 process.once('SIGTERM', () => bot.stop('SIGTERM'));
-
-
-
-
+        
